@@ -1,56 +1,103 @@
-name: CCTV端口扫描（极限优化版）
+name: 扫描器
 
 on:
   workflow_dispatch:
     inputs:
-      max_concurrent:
-        description: 'TCP并发数'
+      scan_mode:
+        description: '扫描模式'
         required: false
-        default: '2000'
+        default: 'smart'
         type: choice
         options:
+          - 'smart (智能模式-推荐)'
+          - 'ultra (极限模式-最快)'
+          - 'conservative (保守模式-最稳)'
+      max_workers:
+        description: '并发线程数'
+        required: false
+        default: '800'
+        type: choice
+        options:
+          - '500'
+          - '800'
           - '1000'
-          - '2000'
-          - '3000'
+      enable_verify:
+        description: '验证结果'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+  schedule:
+    - cron: '0 2 * * *'  # 每天凌晨2点执行
 
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 30  # 优化版只需要30分钟
+    timeout-minutes: 30  # 30分钟超时
     
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
       
-      - name: 设置Python
+      - name: 设置Python环境
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
       
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
-          pip install aiohttp
-          # uvloop可选，可提速30%
-          pip install uvloop || echo "uvloop安装失败，使用标准asyncio"
+          pip install --upgrade requests
+          echo "依赖安装完成"
       
       - name: 系统优化
         run: |
           # 增加文件描述符限制
           ulimit -n 65535
           echo "文件描述符限制: $(ulimit -n)"
+          
           # 优化网络参数
           sudo sysctl -w net.ipv4.ip_local_port_range="1024 65535"
           sudo sysctl -w net.core.somaxconn=4096
           sudo sysctl -w net.ipv4.tcp_tw_reuse=1
           sudo sysctl -w net.ipv4.tcp_fin_timeout=10
+          sudo sysctl -w net.ipv4.tcp_syn_retries=2
+          
+          # 显示系统信息
+          echo "系统优化完成"
       
-      - name: 运行极限扫描器
+      - name: 创建结果目录
+        run: |
+          mkdir -p results
+          mkdir -p logs
+      
+      - name: 运行扫描器
         run: |
           echo "=========================================="
           echo "开始扫描: $(date)"
+          echo "扫描模式: ${{ github.event.inputs.scan_mode }}"
+          echo "并发线程: ${{ github.event.inputs.max_workers }}"
           echo "=========================================="
-          python py/scanner.py
+          
+          # 根据选择运行不同的扫描模式
+          MODE="${{ github.event.inputs.scan_mode }}"
+          WORKERS="${{ github.event.inputs.max_workers }}"
+          VERIFY="${{ github.event.inputs.enable_verify }}"
+          
+          if [[ "$MODE" == *"smart"* ]]; then
+            echo "使用智能模式扫描"
+            python scanner.py --mode smart --workers $WORKERS --verify $VERIFY
+          elif [[ "$MODE" == *"ultra"* ]]; then
+            echo "使用极限模式扫描"
+            python scanner.py --mode ultra --workers $WORKERS --verify $VERIFY
+          else
+            echo "使用保守模式扫描"
+            python scanner_bs.py --workers $WORKERS
+          fi
+          
           echo "=========================================="
           echo "扫描结束: $(date)"
           echo "=========================================="
@@ -62,15 +109,58 @@ jobs:
             echo "========== 扫描结果 =========="
             cat migu.txt
             echo "=============================="
-            echo "有效目标数: $(wc -l < migu.txt)"
+            COUNT=$(wc -l < migu.txt)
+            echo "有效目标数: $COUNT"
+            
+            # 显示详细统计
+            if [ $COUNT -gt 0 ]; then
+              echo ""
+              echo "========== 结果统计 =========="
+              echo "按端口统计:"
+              cat migu.txt | cut -d: -f2 | sort | uniq -c | while read line; do
+                echo "  $line"
+              done
+            fi
+          else
+            echo "未找到结果文件"
           fi
       
-      - name: 上传结果
+      - name: 生成扫描报告
+        if: success()
+        run: |
+          cat > scan_report.md << EOF
+          # CCTV端口扫描报告
+          
+          ## 扫描信息
+          - **扫描时间**: $(date '+%Y-%m-%d %H:%M:%S')
+          - **扫描模式**: ${{ github.event.inputs.scan_mode }}
+          - **并发线程**: ${{ github.event.inputs.max_workers }}
+          - **运行环境**: ${{ runner.os }}
+          
+          ## 扫描结果
+          \`\`\`
+          $(cat migu.txt 2>/dev/null || echo "无结果")
+          \`\`\`
+          
+          ## 统计信息
+          - **发现目标数**: $(wc -l < migu.txt 2>/dev/null || echo 0)
+          
+          ---
+          *报告由 GitHub Actions 自动生成*
+          EOF
+          
+          echo "扫描报告已生成"
+      
+      - name: 上传扫描结果
         uses: actions/upload-artifact@v4
         with:
-          name: cctv-scan-results-extreme
-          path: migu.txt
+          name: cctv-scan-results-$(date +%Y%m%d-%H%M%S)
+          path: |
+            migu.txt
+            scan_report.md
+            results/
           retention-days: 30
+          compression-level: 9
       
       - name: 提交结果到仓库
         if: success()
@@ -78,10 +168,38 @@ jobs:
           if [ -f migu.txt ] && [ -s migu.txt ]; then
             COUNT=$(wc -l < migu.txt)
             if [ "$COUNT" -gt 0 ]; then
+              # 配置Git
               git config user.name "github-actions[bot]"
               git config user.email "github-actions[bot]@users.noreply.github.com"
-              git add migu.txt
-              git commit -m "极限扫描结果: 发现 $COUNT 个目标 [skip ci]" || echo "无变化"
+              
+              # 备份旧结果
+              if [ -f migu.txt ]; then
+                cp migu.txt results/migu_$(date +%Y%m%d_%H%M%S).txt
+              fi
+              
+              # 提交新结果
+              git add migu.txt results/ scan_report.md
+              git commit -m "扫描结果更新: 发现 $COUNT 个CCTV目标 [skip ci]" || echo "无变化"
               git push
+            else
+              echo "未发现目标，跳过提交"
             fi
+          else
+            echo "结果文件为空，跳过提交"
           fi
+      
+      - name: 发送通知（可选）
+        if: always()
+        run: |
+          COUNT=$(wc -l < migu.txt 2>/dev/null || echo 0)
+          echo "::notice::扫描完成！发现 $COUNT 个目标"
+          echo "::notice::详细结果请查看Artifacts"
+
+  cleanup:
+    needs: scan
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: 清理旧文件
+        run: |
+          echo "清理完成"
