@@ -3,28 +3,20 @@ name: CCTV端口扫描（极限优化版）
 on:
   workflow_dispatch:
     inputs:
-      scan_type:
-        description: '扫描类型'
+      max_concurrent:
+        description: 'TCP并发数'
         required: false
-        default: 'fast'
+        default: '2000'
         type: choice
         options:
-          - 'fast (仅HTTP)'
-          - 'extreme (极限加速)'
-      max_workers:
-        description: '并发线程数'
-        required: false
-        default: '500'
-        type: choice
-        options:
-          - '500'
           - '1000'
           - '2000'
+          - '3000'
 
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 60  # 减少到60分钟（原355分钟）
+    timeout-minutes: 30  # 优化版只需要30分钟
     
     steps:
       - name: 检出代码
@@ -42,12 +34,16 @@ jobs:
           # uvloop可选，可提速30%
           pip install uvloop || echo "uvloop安装失败，使用标准asyncio"
       
-      - name: 系统优化（增加文件描述符限制）
+      - name: 系统优化
         run: |
+          # 增加文件描述符限制
           ulimit -n 65535
           echo "文件描述符限制: $(ulimit -n)"
-          sysctl net.ipv4.ip_local_port_range="1024 65535"
-          sysctl net.core.somaxconn=4096
+          # 优化网络参数
+          sudo sysctl -w net.ipv4.ip_local_port_range="1024 65535"
+          sudo sysctl -w net.core.somaxconn=4096
+          sudo sysctl -w net.ipv4.tcp_tw_reuse=1
+          sudo sysctl -w net.ipv4.tcp_fin_timeout=10
       
       - name: 运行极限扫描器
         run: |
@@ -67,8 +63,6 @@ jobs:
             cat migu.txt
             echo "=============================="
             echo "有效目标数: $(wc -l < migu.txt)"
-          else
-            echo "未找到结果文件"
           fi
       
       - name: 上传结果

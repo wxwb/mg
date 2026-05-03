@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CCTV端口扫描器 - 极限优化版
+CCTV端口扫描器 - 极限优化版（修复版）
 使用异步IO + 连接池 + 智能超时
 """
 
@@ -8,10 +8,7 @@ import ipaddress
 import asyncio
 import aiohttp
 import aiohttp.client_exceptions
-from concurrent.futures import ThreadPoolExecutor
 import time
-from collections import deque
-import socket
 
 # ==================== 优化配置 ====================
 IP_RANGES = [
@@ -30,19 +27,9 @@ MAX_CONCURRENT_TCP = 2000      # TCP并发连接数
 MAX_CONCURRENT_HTTP = 500       # HTTP并发请求数
 TCP_TIMEOUT = 1.0              # TCP超时降低到1秒
 HTTP_TIMEOUT = 2.0             # HTTP超时2秒
-TCP_RETRY = 0                  # 不重试，加快速度
-
-# 连接复用
-TCP_KEEPALIVE = False          # 关闭keepalive
-NAGLE_ALGO = False             # 禁用Nagle算法
-
-# 缓冲优化
-WRITE_BUFFER = 8192            # 增大写缓冲
-READ_BUFFER = 16384            # 增大读缓冲
 
 # ==============================================
 
-# 预解析IP为字节格式（加速socket操作）
 async def check_target_tcp(ip: str, port: int, semaphore: asyncio.Semaphore):
     """异步TCP端口检测"""
     async with semaphore:
@@ -126,14 +113,14 @@ async def main_async():
     tcp_sem = asyncio.Semaphore(MAX_CONCURRENT_TCP)
     http_sem = asyncio.Semaphore(MAX_CONCURRENT_HTTP)
     
-    # 创建HTTP会话，配置连接池优化
+    # 修复：创建HTTP会话，移除冲突的配置
     connector = aiohttp.TCPConnector(
         limit=MAX_CONCURRENT_HTTP,
         limit_per_host=MAX_CONCURRENT_HTTP,
         ttl_dns_cache=300,           # DNS缓存5分钟
         enable_cleanup_closed=True,
         force_close=True,             # 强制关闭连接，不复用
-        keepalive_timeout=0,          # 不保持连接
+        # 移除 keepalive_timeout（与force_close冲突）
     )
     
     # 设置更激进的超时
@@ -152,37 +139,42 @@ async def main_async():
         print("\n开始扫描...")
         start = time.time()
         
-        # 创建所有任务
-        tasks = []
-        for ip, port in targets:
-            task = asyncio.create_task(
-                scan_worker(ip, port, tcp_sem, http_sem, session, results, stats)
-            )
-            tasks.append(task)
-            
-            # 分批显示进度
-            if len(tasks) % 10000 == 0:
-                await asyncio.sleep(0)  # 让出控制权
+        # 创建所有任务（分批创建避免内存爆炸）
+        batch_size = 50000
+        all_results = []
         
-        # 使用as_completed监控进度
-        completed = 0
-        last_log_time = time.time()
-        
-        for coro in asyncio.as_completed(tasks):
-            completed += 1
-            await coro  # 等待完成
+        for i in range(0, len(targets), batch_size):
+            batch = targets[i:i+batch_size]
+            print(f"\n处理批次 {i//batch_size + 1}/{(len(targets)-1)//batch_size + 1} ({len(batch)} 个目标)")
             
-            # 每5秒或每10000个任务显示进度
-            now = time.time()
-            if now - last_log_time >= 5 or completed % 10000 == 0:
-                pct = completed * 100 // total_targets
-                elapsed = now - start
-                speed = completed / elapsed if elapsed > 0 else 0
-                print(f"  📊 进度: {pct}% ({completed:,}/{total_targets:,}) "
-                      f"速度: {speed:.0f}/s "
-                      f"TCP通:{stats['tcp_open']:,} "
-                      f"发现:{len(results)}")
-                last_log_time = now
+            tasks = []
+            for ip, port in batch:
+                task = asyncio.create_task(
+                    scan_worker(ip, port, tcp_sem, http_sem, session, results, stats)
+                )
+                tasks.append(task)
+            
+            # 监控进度
+            completed = 0
+            last_log_time = time.time()
+            
+            for coro in asyncio.as_completed(tasks):
+                completed += 1
+                await coro  # 等待完成
+                
+                # 每2秒或每5000个任务显示进度
+                now = time.time()
+                if now - last_log_time >= 2 or completed % 5000 == 0:
+                    pct = (i + completed) * 100 // total_targets
+                    elapsed = now - start
+                    speed = (i + completed) / elapsed if elapsed > 0 else 0
+                    print(f"  📊 进度: {pct}% ({(i+completed):,}/{total_targets:,}) "
+                          f"速度: {speed:.0f}/s "
+                          f"TCP通:{stats['tcp_open']:,} "
+                          f"发现:{len(results)}")
+                    last_log_time = now
+            
+            all_results.extend(results)
     
     # 保存结果
     with open('migu.txt', 'w') as f:
