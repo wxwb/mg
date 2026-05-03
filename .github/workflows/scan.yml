@@ -1,0 +1,94 @@
+name: CCTV端口扫描
+
+on:
+  workflow_dispatch:
+    inputs:
+      scan_type:
+        description: '扫描类型'
+        required: false
+        default: 'fast'
+        type: choice
+        options:
+          - 'fast (仅HTTP)'
+          - 'standard (HTTP+HTTPS)'
+      max_workers:
+        description: '并发线程数'
+        required: false
+        default: '200'
+        type: choice
+        options:
+          - '100'
+          - '200'
+          - '300'
+  schedule:
+    - cron: '0 2 * * *'
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+      
+      - name: 设置Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: 安装依赖(无需额外安装)
+        run: |
+          python --version
+          echo "使用Python标准库，无需安装依赖"
+      
+      - name: 运行扫描器
+        run: |
+          echo "=========================================="
+          echo "开始扫描: $(date)"
+          echo "=========================================="
+          
+          # 根据选择运行不同的扫描器
+          if [ "${{ github.event.inputs.scan_type }}" = "fast (仅HTTP)" ]; then
+            echo "使用快速扫描器 (仅HTTP)"
+            python py/scanner_fast.py
+          else
+            echo "使用标准扫描器 (HTTP+HTTPS)"
+            python py/scanner.py
+          fi
+          
+          echo "=========================================="
+          echo "扫描结束: $(date)"
+          echo "=========================================="
+      
+      - name: 显示扫描结果
+        run: |
+          if [ -f migu.txt ]; then
+            echo ""
+            echo "========== 扫描结果 =========="
+            cat migu.txt
+            echo "=============================="
+            echo "有效目标数: $(grep -c '^[0-9]' migu.txt 2>/dev/null || echo 0)"
+          else
+            echo "未找到结果文件"
+          fi
+      
+      - name: 上传结果
+        uses: actions/upload-artifact@v4
+        with:
+          name: cctv-scan-results
+          path: migu.txt
+          retention-days: 30
+      
+      - name: 提交结果到仓库
+        run: |
+          if [ -f migu.txt ] && [ -s migu.txt ]; then
+            COUNT=$(grep -c '^[0-9]' migu.txt 2>/dev/null || echo 0)
+            if [ "$COUNT" -gt 0 ]; then
+              git config user.name "github-actions[bot]"
+              git config user.email "github-actions[bot]@users.noreply.github.com"
+              git add migu.txt
+              git commit -m "更新扫描结果: 发现 $COUNT 个CCTV目标 [skip ci]" || echo "无变化"
+              git push
+            fi
+          fi
