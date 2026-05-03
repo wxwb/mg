@@ -90,19 +90,16 @@ def main():
     print(f"  HTTP超时: {TIMEOUT}秒")
     print(f"  扫描端口: {PORTS}")
     
-    # 生成目标
     targets, total_ips = generate_targets()
     total_targets = len(targets)
     
     print(f"\n总目标: {total_targets:,}")
     print(f"  (IP: {total_ips:,} × 端口: {len(PORTS)})")
     
-    # 估算时间
     estimated_speed = args.workers * 0.3
     estimated_minutes = total_targets / estimated_speed / 60
     print(f"  预计耗时: {estimated_minutes:.0f}-{estimated_minutes*1.2:.0f} 分钟")
     
-    # 开始扫描
     print("\n开始扫描...")
     print("-" * 60)
     start_time = time.time()
@@ -132,11 +129,9 @@ def main():
                 print(f"     已发现: {len(results)}")
                 print(f"     预计剩余: {eta/60:.1f} 分钟\n")
     
-    # 保存结果
     with open('migu.txt', 'w') as f:
         f.write('\n'.join(results))
     
-    # 统计
     elapsed = time.time() - start_time
     print("=" * 60)
     print("扫描完成！")
