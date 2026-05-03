@@ -1,4 +1,4 @@
-name: CCTV端口扫描
+name: CCTV端口扫描（极限优化版）
 
 on:
   workflow_dispatch:
@@ -10,23 +10,21 @@ on:
         type: choice
         options:
           - 'fast (仅HTTP)'
-          - 'standard (HTTP+HTTPS)'
+          - 'extreme (极限加速)'
       max_workers:
         description: '并发线程数'
         required: false
-        default: '200'
+        default: '500'
         type: choice
         options:
-          - '100'
-          - '200'
-          - '300'
-  schedule:
-    - cron: '0 2 * * *'
+          - '500'
+          - '1000'
+          - '2000'
 
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 355
+    timeout-minutes: 60  # 减少到60分钟（原355分钟）
     
     steps:
       - name: 检出代码
@@ -37,26 +35,26 @@ jobs:
         with:
           python-version: '3.11'
       
-      - name: 安装依赖(无需额外安装)
+      - name: 安装依赖
         run: |
-          python --version
-          echo "使用Python标准库，无需安装依赖"
+          python -m pip install --upgrade pip
+          pip install aiohttp
+          # uvloop可选，可提速30%
+          pip install uvloop || echo "uvloop安装失败，使用标准asyncio"
       
-      - name: 运行扫描器
+      - name: 系统优化（增加文件描述符限制）
+        run: |
+          ulimit -n 65535
+          echo "文件描述符限制: $(ulimit -n)"
+          sysctl net.ipv4.ip_local_port_range="1024 65535"
+          sysctl net.core.somaxconn=4096
+      
+      - name: 运行极限扫描器
         run: |
           echo "=========================================="
           echo "开始扫描: $(date)"
           echo "=========================================="
-          
-          # 根据选择运行不同的扫描器
-          if [ "${{ github.event.inputs.scan_type }}" = "fast (仅HTTP)" ]; then
-            echo "使用快速扫描器 (仅HTTP)"
-            python py/scanner_fast.py
-          else
-            echo "使用标准扫描器 (HTTP+HTTPS)"
-            python py/scanner.py
-          fi
-          
+          python py/scanner.py
           echo "=========================================="
           echo "扫描结束: $(date)"
           echo "=========================================="
@@ -68,7 +66,7 @@ jobs:
             echo "========== 扫描结果 =========="
             cat migu.txt
             echo "=============================="
-            echo "有效目标数: $(grep -c '^[0-9]' migu.txt 2>/dev/null || echo 0)"
+            echo "有效目标数: $(wc -l < migu.txt)"
           else
             echo "未找到结果文件"
           fi
@@ -76,19 +74,20 @@ jobs:
       - name: 上传结果
         uses: actions/upload-artifact@v4
         with:
-          name: cctv-scan-results
+          name: cctv-scan-results-extreme
           path: migu.txt
           retention-days: 30
       
       - name: 提交结果到仓库
+        if: success()
         run: |
           if [ -f migu.txt ] && [ -s migu.txt ]; then
-            COUNT=$(grep -c '^[0-9]' migu.txt 2>/dev/null || echo 0)
+            COUNT=$(wc -l < migu.txt)
             if [ "$COUNT" -gt 0 ]; then
               git config user.name "github-actions[bot]"
               git config user.email "github-actions[bot]@users.noreply.github.com"
               git add migu.txt
-              git commit -m "更新扫描结果: 发现 $COUNT 个CCTV目标 [skip ci]" || echo "无变化"
+              git commit -m "极限扫描结果: 发现 $COUNT 个目标 [skip ci]" || echo "无变化"
               git push
             fi
           fi
