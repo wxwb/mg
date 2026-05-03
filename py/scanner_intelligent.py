@@ -30,20 +30,20 @@ IP_RANGES = [
 # 按活跃度排序的端口（活跃的放前面）
 PORTS = [3000, 1234, 7788, 49155]
 
-# CCTV响应特征（基于实际M3U8内容）
+# CCTV响应特征（基于实际M3U8内容）- 使用字符串而非bytes
 CCTV_SIGNATURES = [
-    b'#EXTM3U',
-    b'x-tvg-url',
-    b'group-title="央视"',
-    b'CCTV1综合',
-    b'CCTV2财经',
-    b'CCTV',
-    b'playback.xml',
-    b'catchup="append"'
+    '#EXTM3U',
+    'x-tvg-url',
+    'group-title="央视"',
+    'CCTV1综合',
+    'CCTV2财经',
+    'CCTV',
+    'playback.xml',
+    'catchup="append"'
 ]
 
-# 预编译正则表达式
-CCTV_PATTERN = re.compile(rb'#EXTM3U.*?(?:CCTV|央视)', re.DOTALL)
+# 预编译正则表达式（匹配bytes）
+CCTV_PATTERN = re.compile(rb'#EXTM3U.*?(?:CCTV|[\xe5\xa4\xae\xe8\xa7\x86])', re.DOTALL)
 
 # ==============================================
 
@@ -119,27 +119,38 @@ class FastCCTVScanner:
             )
             
             with urllib.request.urlopen(req, timeout=self.timeout_http) as response:
+                # 只读取必要的数据量
                 content = response.read(1024)
                 
-                if b'group-title="央视"' in content:
+                # 转换为字符串进行匹配（处理中文）
+                content_str = content.decode('utf-8', errors='ignore')
+                
+                # 快速特征匹配
+                if 'group-title="央视"' in content_str:
                     self.stats['http_matches'] += 1
                     return True
-                if b'#EXTM3U' in content and b'CCTV' in content:
+                if '#EXTM3U' in content_str and 'CCTV' in content_str:
+                    self.stats['http_matches'] += 1
+                    return True
+                if 'CCTV1综合' in content_str or 'CCTV2财经' in content_str:
                     self.stats['http_matches'] += 1
                     return True
                 
-                if CCTV_PATTERN.search(content):
-                    self.stats['http_matches'] += 1
-                    return True
-                
+                # 逐个特征匹配
                 for sig in CCTV_SIGNATURES:
-                    if sig in content:
+                    if sig in content_str:
                         self.stats['http_matches'] += 1
                         return True
                         
             self.stats['http_checks'] += 1
             return False
-        except:
+        except urllib.error.HTTPError as e:
+            self.stats['http_errors'] += 1
+            return False
+        except (urllib.error.URLError, socket.timeout, socket.error):
+            self.stats['http_errors'] += 1
+            return False
+        except Exception:
             self.stats['http_errors'] += 1
             return False
     
@@ -150,12 +161,17 @@ class FastCCTVScanner:
             sock.settimeout(self.timeout_tcp)
             sock.connect((ip, port))
             
+            # 发送简化的HTTP请求
             request = f"GET / HTTP/1.1\r\nHost: {ip}\r\nConnection: close\r\n\r\n"
             sock.send(request.encode())
+            
+            # 只读取前512字节
             data = sock.recv(512)
             sock.close()
             
-            if b'#EXTM3U' in data or (b'CCTV' in data and b'http' in data):
+            # 检查特征（转为字符串）
+            data_str = data.decode('utf-8', errors='ignore')
+            if '#EXTM3U' in data_str or ('CCTV' in data_str and 'http' in data_str):
                 self.stats['ultra_matches'] += 1
                 return True
         except:
@@ -171,6 +187,7 @@ class FastCCTVScanner:
             with urllib.request.urlopen(req, timeout=3) as resp:
                 content = resp.read(8192).decode('utf-8', errors='ignore')
                 
+                # 提取频道信息
                 for line in content.split('\n'):
                     if 'CCTV' in line and 'tvg-name' in line:
                         match = re.search(r'tvg-name="([^"]+)"', line)
@@ -186,19 +203,22 @@ class FastCCTVScanner:
     
     def check_target(self, ip, port, mode='smart', progress=None):
         """检测单个目标"""
+        # TCP快速检测
         if not self.tcp_check(ip, port):
             if progress:
                 progress.update(False)
             return None
         
+        # HTTP检测
         if mode == 'ultra':
             result = self.ultra_quick_check(ip, port)
-        else:
+        else:  # smart mode
             result = self.http_check(ip, port)
         
         if result:
             target = f"{ip}:{port}"
             
+            # 可选验证
             if self.verify:
                 channels = self.verify_target(ip, port)
                 if channels:
@@ -229,15 +249,19 @@ class FastCCTVScanner:
         start_time = time.time()
         
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            # 提交所有任务
             futures = {
                 executor.submit(self.check_target, ip, port, mode, progress): (ip, port)
                 for ip, port in targets
             }
             
+            # 收集结果
             for future in as_completed(futures):
                 result = future.result()
                 if result:
                     self.results.append(result)
+                
+                # 定期显示进度
                 progress.log_progress()
         
         elapsed = time.time() - start_time
@@ -307,6 +331,7 @@ def main():
     print("  基于M3U8内容特征优化")
     print("=" * 70)
     
+    # 显示配置
     print(f"\n配置信息:")
     print(f"  扫描模式: {args.mode}")
     print(f"  并发线程: {args.workers}")
@@ -315,6 +340,7 @@ def main():
     print(f"  结果验证: {args.verify}")
     print(f"  输出文件: {args.output}")
     
+    # 生成目标
     targets, total_ips = generate_targets()
     total_targets = len(targets)
     
@@ -323,10 +349,12 @@ def main():
     print(f"  端口数: {len(PORTS)}")
     print(f"  总目标: {total_targets:,}")
     
+    # 估算时间
     estimated_speed = args.workers * 0.5
     estimated_minutes = total_targets / estimated_speed / 60
     print(f"  预计耗时: {estimated_minutes:.0f}-{estimated_minutes*1.2:.0f} 分钟")
     
+    # 创建扫描器
     verify = args.verify.lower() == 'true'
     scanner = FastCCTVScanner(
         max_workers=args.workers,
@@ -335,12 +363,15 @@ def main():
         verify=verify
     )
     
+    # 开始扫描
     scan_start = time.time()
     results = scanner.scan(targets, mode=args.mode)
     scan_elapsed = time.time() - scan_start
     
+    # 保存结果
     save_results(results, args.output)
     
+    # 最终统计
     print("\n" + "=" * 70)
     print("扫描完成！")
     print(f"  ✅ 发现目标: {len(results)} 个")
@@ -355,6 +386,21 @@ def main():
             print(f"  ... 还有 {len(results)-20} 个")
     
     print("=" * 70)
+    
+    # 生成统计报告
+    stats_file = f"stats_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    with open(stats_file, 'w') as f:
+        json.dump({
+            'scan_time': datetime.now().isoformat(),
+            'mode': args.mode,
+            'workers': args.workers,
+            'total_targets': total_targets,
+            'found': len(results),
+            'elapsed_seconds': scan_elapsed,
+            'speed': total_targets/scan_elapsed,
+            'results': results
+        }, f, indent=2)
+    
     return results
 
 if __name__ == "__main__":
