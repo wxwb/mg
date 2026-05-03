@@ -1,4 +1,4 @@
-name: CCTV端口扫描器
+name: TV-Scan
 
 on:
   workflow_dispatch:
@@ -82,10 +82,10 @@ jobs:
           
           if [[ "$MODE" == *"smart"* ]]; then
             echo "使用智能模式扫描"
-            python py/scanner_intelligent.py --mode smart --workers $WORKERS --verify $VERIFY
+            python py/scanner_intelligent.py --mode smart --workers $WORKERS --verify $VERIFY --output migu.txt
           elif [[ "$MODE" == *"ultra"* ]]; then
             echo "使用极限模式扫描"
-            python py/scanner_intelligent.py --mode ultra --workers $WORKERS --verify $VERIFY
+            python py/scanner_intelligent.py --mode ultra --workers $WORKERS --verify $VERIFY --output migu.txt
           else
             echo "使用保守模式扫描"
             python py/scanner_conservative.py --workers $WORKERS
@@ -94,10 +94,24 @@ jobs:
           echo "=========================================="
           echo "扫描结束: $(date)"
           echo "=========================================="
+          
+          # 显示结果文件内容用于调试
+          echo ""
+          echo "========== 结果文件调试信息 =========="
+          if [ -f migu.txt ]; then
+            echo "文件存在: migu.txt"
+            echo "文件大小: $(wc -c < migu.txt) 字节"
+            echo "文件行数: $(wc -l < migu.txt) 行"
+            echo "文件内容:"
+            cat migu.txt
+          else
+            echo "文件不存在: migu.txt"
+          fi
+          echo "======================================"
       
       - name: 显示扫描结果
         run: |
-          if [ -f migu.txt ]; then
+          if [ -f migu.txt ] && [ -s migu.txt ]; then
             echo ""
             echo "========== 扫描结果 =========="
             cat migu.txt
@@ -114,7 +128,9 @@ jobs:
               done
             fi
           else
-            echo "未找到结果文件"
+            echo "未找到结果文件或文件为空"
+            # 创建空文件避免后续步骤失败
+            touch migu.txt
           fi
       
       - name: 生成扫描报告
@@ -140,6 +156,8 @@ jobs:
           ---
           *报告由 GitHub Actions 自动生成*
           EOF
+          
+          echo "报告已生成: scan_report.md"
       
       - name: 上传扫描结果
         uses: actions/upload-artifact@v4
@@ -154,21 +172,38 @@ jobs:
       - name: 提交结果到仓库
         if: success()
         run: |
-          if [ -f migu.txt ] && [ -s migu.txt ]; then
-            COUNT=$(wc -l < migu.txt)
-            if [ "$COUNT" -gt 0 ]; then
-              git config user.name "github-actions[bot]"
-              git config user.email "github-actions[bot]@users.noreply.github.com"
-              
-              if [ -f migu.txt ]; then
-                cp migu.txt results/migu_$(date +%Y%m%d_%H%M%S).txt
-              fi
-              
-              git add migu.txt results/ scan_report.md
-              git commit -m "扫描结果更新: 发现 $COUNT 个CCTV目标 [skip ci]" || echo "无变化"
-              git push
-            fi
+          # 确保 migu.txt 存在
+          if [ ! -f migu.txt ]; then
+            touch migu.txt
           fi
+          
+          COUNT=$(wc -l < migu.txt)
+          echo "结果文件行数: $COUNT"
+          
+          # 始终提交（即使为空也提交，避免后续问题）
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # 备份到 results 目录
+          if [ -f migu.txt ]; then
+            cp migu.txt results/migu_$(date +%Y%m%d_%H%M%S).txt
+            echo "已备份到 results 目录"
+          fi
+          
+          # 添加并提交
+          git add migu.txt results/ scan_report.md
+          if [ $COUNT -gt 0 ]; then
+            git commit -m "扫描结果更新: 发现 $COUNT 个CCTV目标 [skip ci]" || echo "无变化"
+          else
+            git commit -m "扫描完成: 未发现新目标 [skip ci]" || echo "无变化"
+          fi
+          git push || echo "推送失败或无需推送"
+          
+          # 显示最终结果
+          echo ""
+          echo "========== 最终结果 =========="
+          cat migu.txt
+          echo "=============================="
 
   cleanup:
     needs: scan
@@ -176,4 +211,7 @@ jobs:
     if: always()
     steps:
       - name: 清理旧文件
-        run: echo "清理完成"
+        run: |
+          echo "清理完成"
+          # 可选: 清理超过30天的旧结果文件
+          find results/ -name "migu_*.txt" -mtime +30 -delete 2>/dev/null || true
